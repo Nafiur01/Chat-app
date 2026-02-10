@@ -16,6 +16,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 manager = ConnectionManager()
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+last_frame = None
+
 
 
 @app.get("/")
@@ -47,5 +49,29 @@ async def websocket_endpoint(websocket: WebSocket):
             await manager.broadcast(message.model_dump(mode='json'))
     except WebSocketDisconnect:
         await manager.disconnect(client_id)
+
+@app.websocket("/ws/stream")
+async def video_endpoint(websocket: WebSocket):
+    global last_frame
+    client_id = await manager.connect_stream(websocket)
+
+    await manager.broadcast_stream_json({"type":"viewer_count","count":manager.active_streams_count()})
+    
+    # Send last frame to new subscriber
+    if last_frame:
+        await websocket.send_bytes(last_frame)
+
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            last_frame = data  # Update last frame cache
+            await manager.broadcast_stream(data, exclude_id=client_id)
+    except WebSocketDisconnect:
+        await manager.disconnect_stream(client_id)
+        await manager.broadcast_stream_json({"type": "viewer_count", "count": manager.active_streams_count()})
+    
+
+
+    
 
 

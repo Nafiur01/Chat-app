@@ -18,3 +18,7 @@ class WebSocketMessage(BaseModel):
 class WebSocketConnection(BaseModel):
     client_id: UUID = Field(default_factory=uuid.uuid4)
     history: List[WebSocketMessage] = []
+
+class WebSocketStreamConnection(BaseModel):
+    client_id: UUID = Field(default_factory=uuid.uuid4)
+    
