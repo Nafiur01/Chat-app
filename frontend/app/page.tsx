@@ -1,169 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Hls from "hls.js";
-
-// --- Components ---
-
-const VideoBroadcaster = ({ streamUrl }: { streamUrl?: string }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  const [isBroadcasting, setIsBroadcasting] = useState(false);
+// import components
+import VideoViewer from "./components/VideoViewer";
+import VideoBroadcaster from "./components/VideoBroadcaster";
+import HlsPlayer from "./components/HlsPlayer";
 
 
-  const startBroadcasting = async () => {
-    try {
-      if (streamUrl && videoRef.current) {
-        // Broadcast from URL using hls.js
-        if (Hls.isSupported()) {
-          const hls = new Hls({
-            lowLatencyMode: true,
-            backBufferLength: 60
-          });
-          hls.loadSource(streamUrl);
-          hls.attachMedia(videoRef.current);
-        } else if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
-          videoRef.current.src = streamUrl;
-        }
-      } else {
-        // Broadcast from Camera
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        if (videoRef.current) videoRef.current.srcObject = stream;
-      }
-
-      socketRef.current = new WebSocket("ws://localhost:8000/ws/stream");
-      setIsBroadcasting(true);
-
-      const captureLoop = () => {
-        if (
-          videoRef.current &&
-          canvasRef.current &&
-          socketRef.current?.readyState === WebSocket.OPEN &&
-          !videoRef.current.paused
-        ) {
-          const ctx = canvasRef.current.getContext("2d");
-          ctx?.drawImage(videoRef.current, 0, 0, 400, 225);
-          canvasRef.current.toBlob((blob) => {
-            if (blob) socketRef.current?.send(blob);
-          }, "image/jpeg", 0.6);
-        }
-        if (socketRef.current?.readyState !== WebSocket.CLOSED) {
-          setTimeout(captureLoop, 100); // 10 FPS to save bandwith
-        }
-      };
-      captureLoop();
-    } catch (err) {
-      console.error("Broadcasting failed:", err);
-    }
-  };
-
-  const stopBroadcasting = () => {
-    socketRef.current?.close();
-    setIsBroadcasting(false);
-    if (videoRef.current?.srcObject) {
-      (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
-    }
-  };
-
-  return (
-    <div className="video-card">
-      <h3>{streamUrl ? "URL Streamer" : "Camera Streamer"}</h3>
-      <video ref={videoRef} autoPlay playsInline muted crossOrigin="anonymous" />
-      <canvas ref={canvasRef} width={400} height={225} style={{ display: "none" }} />
-      <div className="controls">
-        {!isBroadcasting ? (
-          <button onClick={startBroadcasting} className="btn-primary">Go Live</button>
-        ) : (
-          <button onClick={stopBroadcasting} className="btn-danger">Stop</button>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const VideoViewer = () => {
-  const imgRef = useRef<HTMLImageElement>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [activeStreams, setActiveStreams] = useState<number>(0);
-
-  useEffect(() => {
-    const socket = new WebSocket("ws://localhost:8000/ws/stream");
-    socket.binaryType = "blob";
-
-    socket.onopen = () => {
-      setIsConnected(true);
-    };
-
-    socket.onmessage = (event) => {
-      if (event.data instanceof Blob) {
-        const url = URL.createObjectURL(event.data);
-        if (imgRef.current) {
-          const oldUrl = imgRef.current.src;
-          imgRef.current.src = url;
-          if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
-        }
-      } else {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === "viewer_count") {
-            setActiveStreams(data.count);
-          }
-        } catch (err) {
-          console.error("Failed to parse stream JSON:", err);
-        }
-      }
-    };
-
-    return () => socket.close();
-  }, []);
-
-  return (
-    <div className="video-card">
-      <h3>
-        Server Relay Feed {isConnected && <span className="pülse"></span>}
-        <span style={{ marginLeft: "auto", fontSize: "0.8rem", color: "#38bdf8" }}>
-          {activeStreams} VIEWERS
-        </span>
-      </h3>
-      <div className="screen">
-        <img ref={imgRef} alt="Stream content" />
-        <div className="quality-badge">Low Latency (JFP)</div>
-      </div>
-    </div>
-  );
-};
-
-const HlsPlayer = ({ url }: { url: string }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  useEffect(() => {
-    if (videoRef.current && url) {
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          maxBufferLength: 30,
-          enableWorker: true,
-          lowLatencyMode: true
-        });
-        hls.loadSource(url);
-        hls.attachMedia(videoRef.current);
-        return () => hls.destroy();
-      } else if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
-        videoRef.current.src = url;
-      }
-    }
-  }, [url]);
-
-  return (
-    <div className="video-card">
-      <h3>High Fidelity Source <span className="badge-hq">HQ</span></h3>
-      <div className="screen">
-        <video ref={videoRef} controls autoPlay muted playsInline />
-        <div className="quality-badge hq">Direct HLS</div>
-      </div>
-    </div>
-  );
-};
+import { StreamVideoProvider } from "./components/StreamVideoProvider";
 
 // --- Main App ---
 
@@ -206,129 +50,131 @@ export default function ChatApp() {
   };
 
   return (
-    <div className="container">
-      <header>
-        <h1>WEBSOCKETS <small>Chat App</small></h1>
-        {clientId && <div className="badge">ID: {clientId.split("-")[0]}</div>}
-      </header>
+    <StreamVideoProvider userId={clientId}>
+      <div className="container">
+        <header>
+          <h1>STREAM <small>Video SDK Chat</small></h1>
+          {clientId && <div className="badge">ID: {clientId.split("-")[0]}</div>}
+        </header>
 
-      <div className="main-layout">
-        {/* Left Side: Video Section */}
-        <div className="video-section">
-          <div className="viewer-main-grid">
-            <VideoViewer />
-            <HlsPlayer url={streamSource} />
-          </div>
-          <div className="broadcaster-grid">
-            <VideoBroadcaster />
-            <div className="video-card">
-              <h3>URL Stream Config</h3>
-              <input
-                className="url-input"
-                value={streamSource}
-                onChange={(e) => setStreamSource(e.target.value)}
-                placeholder="Video URL..."
-              />
+        <div className="main-layout">
+          {/* Left Side: Video Section */}
+          <div className="video-section">
+            <div className="viewer-main-grid">
+              <VideoViewer />
+              <HlsPlayer url={streamSource} />
+            </div>
+            <div className="broadcaster-grid">
               <VideoBroadcaster streamUrl={streamSource} />
+              <div className="video-card">
+                <h3>External Stream Link</h3>
+                <input
+                  className="url-input"
+                  value={streamSource}
+                  onChange={(e) => setStreamSource(e.target.value)}
+                  placeholder="Video URL..."
+                />
+                <p style={{ fontSize: '0.7rem', color: '#64748b' }}>Use the HLS player above to view this source locally.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Side: Chat Section */}
+          <div className="chat-section">
+            <div className="chat-box">
+              {messages.map((msg, i) => (
+                <div key={i} className="message">{msg}</div>
+              ))}
+            </div>
+            <div className="chat-input-area">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+                placeholder="Type your message..."
+              />
+              <button onClick={sendMessage}>Send</button>
             </div>
           </div>
         </div>
 
-        {/* Right Side: Chat Section */}
-        <div className="chat-section">
-          <div className="chat-box">
-            {messages.map((msg, i) => (
-              <div key={i} className="message">{msg}</div>
-            ))}
-          </div>
-          <div className="chat-input-area">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-              placeholder="Type your message..."
-            />
-            <button onClick={sendMessage}>Send</button>
-          </div>
-        </div>
+        <style jsx global>{`
+          body {
+            margin: 0;
+            font-family: 'Inter', system-ui, sans-serif;
+            background: #4d515aff;
+            color: white;
+          }
+          .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+          }
+          header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+          }
+          h1 { margin: 0; font-weight: 800; letter-spacing: -1px; }
+          h1 small { color: #38bdf8; font-size: 0.5em; opacity: 0.8; }
+          .badge { background: #1e293b; padding: 0.5rem 1rem; border-radius: 99px; font-size: 0.8rem; border: 1px solid #334155; }
+          
+          .main-layout {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 2rem;
+            flex: 1;
+            min-height: 0;
+          }
+
+          .video-section { display: flex; flex-direction: column; gap: 1.5rem; min-height: 0; overflow-y: auto; padding-right: 0.5rem; }
+          .viewer-main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+          .broadcaster-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+
+          .video-card {
+             background: #1e293b;
+             border-radius: 1rem;
+             padding: 1.25rem;
+             border: 1px solid #334155;
+             display: flex;
+             flex-direction: column;
+             gap: 0.75rem;
+             transition: transform 0.2s;
+          }
+          .video-card:hover { border-color: #38bdf844; }
+          .video-card h3 { margin: 0; font-size: 0.8rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 0.5rem; }
+          video, .screen img { width: 100%; border-radius: 0.75rem; aspect-ratio: 16/9; background: #000; object-fit: cover; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+          .screen { position: relative; }
+          
+          .quality-badge { position: absolute; top: 0.75rem; right: 0.75rem; background: rgba(15, 23, 42, 0.8); padding: 0.25rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; color: #94a3b8; border: 1px solid #334155; backdrop-filter: blur(4px); }
+          .quality-badge.hq { color: #fbbf24; border-color: #fbbf2444; }
+          .badge-hq { background: #fbbf24; color: #000; padding: 2px 6px; border-radius: 4px; font-size: 0.6rem; font-weight: 800; }
+
+          .chat-section { display: flex; flex-direction: column; background: #1e293b; border-radius: 1rem; border: 1px solid #334155; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+          .chat-box { flex: 1; padding: 1.5rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; }
+          .message { background: #334155; padding: 0.75rem 1rem; border-radius: 0.75rem; font-size: 0.95rem; align-self: flex-start; }
+
+          .chat-input-area { padding: 1.25rem; background: #0f172a; display: flex; gap: 0.75rem; border-top: 1px solid #334155; }
+          input { flex: 1; background: #1e293b; border: 1px solid #334155; padding: 0.75rem 1rem; border-radius: 0.5rem; color: white; outline: none; }
+          input:focus { border-color: #38bdf8; }
+          .url-input { margin-bottom: 0.5rem; font-size: 0.8rem; }
+          button { background: #38bdf8; color: #0f172a; border: none; padding: 0.75rem 1.5rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; transition: transform 0.1s; }
+          button:active { transform: scale(0.95); }
+          .btn-danger { background: #ef4444; color: white; }
+
+          .pülse { width: 8px; height: 8px; background: #ef4444; border-radius: 50%; box-shadow: 0 0 0 rgba(239, 68, 68, 0.4); animation: pulse 2s infinite; }
+          @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+          }
+        `}</style>
       </div>
-
-      <style jsx global>{`
-        body {
-          margin: 0;
-          font-family: 'Inter', system-ui, sans-serif;
-          background: #4d515aff;
-          color: white;
-        }
-        .container {
-          max-width: 1400px;
-          margin: 0 auto;
-          padding: 2rem;
-          height: 100vh;
-          display: flex;
-          flex-direction: column;
-        }
-        header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 2rem;
-        }
-        h1 { margin: 0; font-weight: 800; letter-spacing: -1px; }
-        h1 small { color: #38bdf8; font-size: 0.5em; opacity: 0.8; }
-        .badge { background: #1e293b; padding: 0.5rem 1rem; border-radius: 99px; font-size: 0.8rem; border: 1px solid #334155; }
-        
-        .main-layout {
-          display: grid;
-          grid-template-columns: 1fr 400px;
-          gap: 2rem;
-          flex: 1;
-          min-height: 0;
-        }
-
-        .video-section { display: flex; flex-direction: column; gap: 1.5rem; min-height: 0; overflow-y: auto; padding-right: 0.5rem; }
-        .viewer-main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-        .broadcaster-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-
-        .video-card {
-           background: #1e293b;
-           border-radius: 1rem;
-           padding: 1.25rem;
-           border: 1px solid #334155;
-           display: flex;
-           flex-direction: column;
-           gap: 0.75rem;
-           transition: transform 0.2s;
-        }
-        .video-card:hover { border-color: #38bdf844; }
-        .video-card h3 { margin: 0; font-size: 0.8rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 0.5rem; }
-        video, .screen img { width: 100%; border-radius: 0.75rem; aspect-ratio: 16/9; background: #000; object-fit: cover; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
-        .screen { position: relative; }
-        
-        .quality-badge { position: absolute; top: 0.75rem; right: 0.75rem; background: rgba(15, 23, 42, 0.8); padding: 0.25rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; color: #94a3b8; border: 1px solid #334155; backdrop-filter: blur(4px); }
-        .quality-badge.hq { color: #fbbf24; border-color: #fbbf2444; }
-        .badge-hq { background: #fbbf24; color: #000; padding: 2px 6px; border-radius: 4px; font-size: 0.6rem; font-weight: 800; }
-
-        .chat-section { display: flex; flex-direction: column; background: #1e293b; border-radius: 1rem; border: 1px solid #334155; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
-        .chat-box { flex: 1; padding: 1.5rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; }
-        .message { background: #334155; padding: 0.75rem 1rem; border-radius: 0.75rem; font-size: 0.95rem; align-self: flex-start; }
-
-        .chat-input-area { padding: 1.25rem; background: #0f172a; display: flex; gap: 0.75rem; border-top: 1px solid #334155; }
-        input { flex: 1; background: #1e293b; border: 1px solid #334155; padding: 0.75rem 1rem; border-radius: 0.5rem; color: white; outline: none; }
-        input:focus { border-color: #38bdf8; }
-        .url-input { margin-bottom: 0.5rem; font-size: 0.8rem; }
-        button { background: #38bdf8; color: #0f172a; border: none; padding: 0.75rem 1.5rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; transition: transform 0.1s; }
-        button:active { transform: scale(0.95); }
-        .btn-danger { background: #ef4444; color: white; }
-
-        .pülse { width: 8px; height: 8px; background: #ef4444; border-radius: 50%; box-shadow: 0 0 0 rgba(239, 68, 68, 0.4); animation: pulse 2s infinite; }
-        @keyframes pulse {
-          0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
-          70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
-          100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
-        }
-      `}</style>
-    </div>
+    </StreamVideoProvider>
   );
 }
 

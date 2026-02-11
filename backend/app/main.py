@@ -2,8 +2,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 from .manager import ConnectionManager
 from schemas.schema import WebSocketMessage
+from getstream import Stream
 import json
+import os
 import redis
+from dotenv import load_dotenv,find_dotenv
 
 
 @asynccontextmanager
@@ -13,16 +16,48 @@ async def lifespan(app: FastAPI):
     print("Redis Connection closing...")
     r.close()
 
+load_dotenv(find_dotenv())
+
+GET_STREAM_API_KEY = os.getenv("GETSTREAM_API_KEY")
+GET_STREAM_SECRET_KEY = os.getenv("GETSTREAM_API_SECRET")
+
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development, allow all. Change to your frontend domain in production.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 manager = ConnectionManager()
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
 last_frame = None
+
+stream_client = Stream(api_key=GET_STREAM_API_KEY,api_secret=GET_STREAM_SECRET_KEY)
 
 
 
 @app.get("/")
 async def health():
     return {"message": "Health is good"}
+
+from getstream.models import UserRequest
+
+@app.get("/stream-token")
+def get_token(user_id: str):
+    try:
+        # Ensure the user has admin/host permissions for livestreaming
+        stream_client.upsert_users(UserRequest(id=user_id, role="admin"))
+        token = stream_client.create_token(user_id=user_id, expiration=3600)
+        return {"token": token}
+    except Exception as e:
+        print(f"Error generating stream token: {e}")
+        raise e
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):

@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@stream-io/video-react-sdk": "^1.32.1",
     "hls.js": "^1.6.15",
     "next": "16.1.6",
     "react": "19.2.3",
