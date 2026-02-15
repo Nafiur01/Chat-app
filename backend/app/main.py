@@ -2,12 +2,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 from .manager import ConnectionManager
 from schemas.schema import WebSocketMessage
-from getstream import Stream
 import json
 import os
 import redis
-from dotenv import load_dotenv,find_dotenv
-
+from dotenv import load_dotenv, find_dotenv
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,9 +15,6 @@ async def lifespan(app: FastAPI):
     r.close()
 
 load_dotenv(find_dotenv())
-
-GET_STREAM_API_KEY = os.getenv("GETSTREAM_API_KEY")
-GET_STREAM_SECRET_KEY = os.getenv("GETSTREAM_API_SECRET")
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -36,28 +31,10 @@ app.add_middleware(
 
 manager = ConnectionManager()
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
-last_frame = None
-
-stream_client = Stream(api_key=GET_STREAM_API_KEY,api_secret=GET_STREAM_SECRET_KEY)
-
-
 
 @app.get("/")
 async def health():
     return {"message": "Health is good"}
-
-from getstream.models import UserRequest
-
-@app.get("/stream-token")
-def get_token(user_id: str):
-    try:
-        # Ensure the user has admin/host permissions for livestreaming
-        stream_client.upsert_users(UserRequest(id=user_id, role="admin"))
-        token = stream_client.create_token(user_id=user_id, expiration=3600)
-        return {"token": token}
-    except Exception as e:
-        print(f"Error generating stream token: {e}")
-        raise e
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
@@ -87,23 +64,44 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.websocket("/ws/stream")
 async def video_endpoint(websocket: WebSocket):
-    global last_frame
-    client_id = await manager.connect_stream(websocket)
+    client_id, role = await manager.connect_stream(websocket)
 
-    await manager.broadcast_stream_json({"type":"viewer_count","count":manager.active_streams_count()})
-    
-    # Send last frame to new subscriber
-    if last_frame:
-        await websocket.send_bytes(last_frame)
+    # If a new viewer joins, notify the broadcaster
+    if role == "viewer" and manager.broadcaster:
+        await manager.send_personal_message({
+            "type": "new-viewer",
+            "viewer_id": client_id
+        }, manager.broadcaster)
+
+    await manager.broadcast_stream_json({
+        "type": "viewer_count",
+        "count": manager.active_streams_count()
+    })
 
     try:
         while True:
-            data = await websocket.receive_bytes()
-            last_frame = data  # Update last frame cache
-            await manager.broadcast_stream(data, exclude_id=client_id)
+            data = await websocket.receive_json()
+            # Handle signaling messages
+            msg_type = data.get("type")
+            target_id = data.get("to")
+
+            if msg_type == "request-viewers" and client_id == manager.broadcaster:
+                viewers = manager.get_viewers()
+                await manager.send_personal_message({
+                    "type": "viewer-list",
+                    "viewers": viewers
+                }, client_id)
+
+            if msg_type in ["offer", "answer", "candidate"] and target_id:
+                # Relay signaling message to specific target
+                await manager.send_personal_message(data, target_id)
+            
     except WebSocketDisconnect:
         await manager.disconnect_stream(client_id)
-        await manager.broadcast_stream_json({"type": "viewer_count", "count": manager.active_streams_count()})
+        await manager.broadcast_stream_json({
+            "type": "viewer_count",
+            "count": manager.active_streams_count()
+        })
     
 
 
