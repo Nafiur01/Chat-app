@@ -1,5 +1,6 @@
+import httpx
 from fastapi import WebSocket
-from typing import List, Dict
+from typing import List, Dict, Optional
 from schemas.schema import WebSocketMessage, WebSocketConnection, WebSocketStreamConnection
 
 class ConnectionManager:
@@ -7,6 +8,15 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.active_streams: Dict[str, WebSocket] = {}
         self.broadcaster: str = None
+        self.sfu_url = "http://127.0.0.1:5000"
+        self.room_id = "default_room"
+        self.producers: Dict[str, str] = {} # kind -> producerId
+
+    async def _sfu_post(self, endpoint: str, data: dict):
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(f"{self.sfu_url}{endpoint}", json=data)
+            response.raise_for_status()
+            return response.json()
 
     async def connect(self, websocket: WebSocket, history: List[dict] = []) -> str: 
         await websocket.accept()
@@ -21,7 +31,6 @@ class ConnectionManager:
         connection = WebSocketStreamConnection()
         client_id = str(connection.client_id)
         
-        # If no broadcaster, this one becomes it
         if self.broadcaster is None:
             self.broadcaster = client_id
             role = "broadcaster"
@@ -30,11 +39,14 @@ class ConnectionManager:
             
         self.active_streams[client_id] = websocket
         
-        # Notify the client of their ID and role
+        # Get SFU Capabilities
+        caps = await self._sfu_post("/create-room", {"roomId": self.room_id})
+
         await websocket.send_json({
             "client_id": client_id,
             "role": role,
-            "broadcaster_id": self.broadcaster
+            "broadcaster_id": self.broadcaster,
+            "routerRtpCapabilities": caps["routerRtpCapabilities"]
         })
         
         return client_id, role
@@ -48,7 +60,7 @@ class ConnectionManager:
             del self.active_streams[client_id]
         if self.broadcaster == client_id:
             self.broadcaster = None
-            # Optionally notify others that broadcast has ended
+            self.producers = {}
             await self.broadcast_stream_json({"type": "broadcast_ended"})
 
     def get_viewers(self):

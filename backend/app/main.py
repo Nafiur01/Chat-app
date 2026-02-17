@@ -6,6 +6,7 @@ import json
 import os
 import redis
 from dotenv import load_dotenv, find_dotenv
+from datetime import datetime
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,6 +48,12 @@ async def websocket_endpoint(websocket: WebSocket):
         history = []
 
     client_id = await manager.connect(websocket, history=history)
+
+    connected_notification = {"message": f"User {client_id} joined the stream | Time: {datetime.now().strftime('%H:%M:%S')}"}
+    connected_notification_msg = WebSocketMessage(client_id=client_id, message=connected_notification["message"])
+
+    await manager.broadcast(connected_notification_msg.model_dump(mode='json'))
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -81,21 +88,75 @@ async def video_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            # Handle signaling messages
             msg_type = data.get("type")
-            target_id = data.get("to")
 
-            if msg_type == "request-viewers" and client_id == manager.broadcaster:
-                viewers = manager.get_viewers()
-                await manager.send_personal_message({
-                    "type": "viewer-list",
-                    "viewers": viewers
-                }, client_id)
+            if msg_type == "create-transport":
+                try:
+                    res = await manager._sfu_post("/create-transport", {"roomId": manager.room_id})
+                    await websocket.send_json({"type": "transport-created", "params": res["params"]})
+                except Exception as e:
+                    print(f"SFU Error (create-transport): {e}")
 
-            if msg_type in ["offer", "answer", "candidate"] and target_id:
-                # Relay signaling message to specific target
-                await manager.send_personal_message(data, target_id)
-            
+            elif msg_type == "connect-transport":
+                try:
+                    await manager._sfu_post("/connect-transport", {
+                        "transportId": data.get("transportId"),
+                        "dtlsParameters": data.get("dtlsParameters")
+                    })
+                    await websocket.send_json({"type": "transport-connected"})
+                except Exception as e:
+                    print(f"SFU Error (connect-transport): {e}")
+
+            elif msg_type == "produce":
+                try:
+                    res = await manager._sfu_post("/produce", {
+                        "roomId": manager.room_id,
+                        "transportId": data.get("transportId"),
+                        "kind": data.get("kind"),
+                        "rtpParameters": data.get("rtpParameters")
+                    })
+                    manager.producers[data.get("kind")] = res["id"]
+                    await websocket.send_json({"type": "produced", "id": res["id"], "kind": data.get("kind")})
+                    
+                    if len(manager.producers) >= 1: 
+                        try:
+                            hls_res = await manager._sfu_post("/start-hls", {"roomId": manager.room_id})
+                            await manager.broadcast_stream_json({
+                                "type": "hls-url",
+                                "url": hls_res["url"]
+                            })
+                        except Exception as e:
+                            print(f"HLS Start failed: {e}")
+                except Exception as e:
+                    print(f"SFU Error (produce): {e}")
+
+            elif msg_type == "consume":
+                try:
+                    res = await manager._sfu_post("/consume", {
+                        "roomId": manager.room_id,
+                        "transportId": data.get("transportId"),
+                        "producerId": data.get("producerId"),
+                        "rtpCapabilities": data.get("rtpCapabilities")
+                    })
+                    await websocket.send_json({
+                        "type": "consumed",
+                        "id": res["id"],
+                        "producerId": res["producerId"],
+                        "kind": res["kind"],
+                        "rtpParameters": res["rtpParameters"]
+                    })
+                except Exception as e:
+                    print(f"SFU Error (consume): {e}")
+
+            elif msg_type == "resume":
+                try:
+                    await manager._sfu_post("/resume-consumer", {"consumerId": data.get("consumerId")})
+                except Exception as e:
+                    print(f"SFU Error (resume): {e}")
+
+            elif msg_type == "request-producers":
+                await websocket.send_json({"type": "producer-list", "producers": manager.producers})
+
     except WebSocketDisconnect:
         await manager.disconnect_stream(client_id)
         await manager.broadcast_stream_json({

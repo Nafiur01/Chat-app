@@ -23,8 +23,9 @@ export default function ChatApp() {
             setMessages(data.history.map((m: any) => `${m.client_id.split("-")[0]}: ${m.message}`));
           }
         } else if (data.message) {
+          const message = data.message;
           const sender = data.client_id.split("-")[0];
-          setMessages((prev) => [...prev, `${sender}: ${data.message}`]);
+          setMessages((prev) => [...prev, `${sender}: ${message}`]);
         }
       } catch {
         setMessages((prev) => [...prev, event.data]);

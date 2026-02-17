@@ -2,98 +2,78 @@
 
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
+import { Device } from "mediasoup-client";
 
 export default function WebRTCStream() {
     const [role, setRole] = useState<"broadcaster" | "viewer" | null>(null);
     const roleRef = useRef<"broadcaster" | "viewer" | null>(null);
     useEffect(() => { roleRef.current = role; }, [role]);
+
     const [clientId, setClientId] = useState<string | null>(null);
     const clientIdRef = useRef<string | null>(null);
     useEffect(() => { clientIdRef.current = clientId; }, [clientId]);
 
     const [viewerCount, setViewerCount] = useState(0);
     const [isLive, setIsLive] = useState(false);
-    const isLiveRef = useRef(false);
-    useEffect(() => { isLiveRef.current = isLive; }, [isLive]);
     const [hlsUrl, setHlsUrl] = useState("https://iowadotsfs1.us-east-1.skyvdn.com:443/rtplive/cbtv58lb/playlist.m3u8");
     const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
 
     const socketRef = useRef<WebSocket | null>(null);
+    const deviceRef = useRef<Device | null>(null);
+    const sendTransportRef = useRef<any>(null);
+    const recvTransportRef = useRef<any>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
-    const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({});
-    const candidateQueues = useRef<{ [key: string]: RTCIceCandidateInit[] }>({});
+
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const hlsRef = useRef<Hls | null>(null);
-
-    const iceServers = {
-        iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" },
-        ],
-    };
 
     useEffect(() => {
         if (!socketRef.current) {
             const socket = new WebSocket("ws://localhost:8000/ws/stream");
             socketRef.current = socket;
 
-            socket.onopen = () => {
-                console.log("[HMR] connected - Stream Socket");
-            };
-
             socket.onmessage = async (event) => {
                 const data = JSON.parse(event.data);
-                console.log("Socket message received:", data.type || "role_assignment");
+                console.log("Socket message received:", data.type || "init");
 
                 switch (data.type) {
                     case "viewer_count":
                         setViewerCount(data.count);
                         break;
 
-                    case "new-viewer":
-                        if (roleRef.current === "broadcaster") {
-                            handleNewViewer(data.viewer_id);
-                        }
+                    case "transport-created":
+                        handleTransportCreated(data.params);
                         break;
 
-                    case "offer":
+                    case "hls-url":
+                        console.log("HLS stream available at:", data.url);
+                        setHlsUrl(`http://localhost:5000${data.url}`);
+                        break;
+
+                    case "producer-list":
                         if (roleRef.current === "viewer") {
-                            handleOffer(data.offer, data.from);
-                        }
-                        break;
-
-                    case "answer":
-                        if (roleRef.current === "broadcaster") {
-                            handleAnswer(data.answer, data.from);
-                        }
-                        break;
-
-                    case "candidate":
-                        handleCandidate(data.candidate, data.from);
-                        break;
-
-                    case "viewer-list":
-                        if (roleRef.current === "broadcaster" && data.viewers) {
-                            data.viewers.forEach((viewerId: string) => {
-                                handleNewViewer(viewerId);
-                            });
+                            handleProducerList(data.producers);
                         }
                         break;
 
                     case "broadcast_ended":
-                        if (roleRef.current === "viewer") {
-                            alert("Broadcaster has left.");
-                            setIsLive(false);
-                            setRemoteStream(null);
-                        }
+                        alert("Broadcaster has left.");
+                        stopStream();
                         break;
 
                     default:
                         if (data.role) {
-                            console.log("Setting role:", data.role);
                             setRole(data.role);
                             setClientId(data.client_id);
+                            // Load Mediasoup Device
+                            const device = new Device();
+                            await device.load({ routerRtpCapabilities: data.routerRtpCapabilities });
+                            deviceRef.current = device;
+
+                            if (data.role === "viewer") {
+                                socket.send(JSON.stringify({ type: "request-producers" }));
+                            }
                         }
                         break;
                 }
@@ -104,46 +84,139 @@ export default function WebRTCStream() {
                 socketRef.current = null;
             };
         }
-
-        return () => {
-            // Only close and stop on unmount, not when role changes
-        };
-    }, [role]);
-
-    // Separate cleanup for component unmount
-    useEffect(() => {
-        return () => {
-            socketRef.current?.close();
-            stopStream();
-        };
     }, []);
 
-    // Use a separate effect to sync the remote stream to the video element
-    useEffect(() => {
-        if (remoteVideoRef.current && remoteStream) {
-            console.log("Attaching remote stream to video element. Tracks:", remoteStream.getTracks().length);
-            remoteVideoRef.current.srcObject = remoteStream;
-            remoteVideoRef.current.play().catch(err => console.error("Error playing remote video:", err));
-        }
-    }, [remoteStream]);
-
     const stopStream = () => {
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => track.stop());
-            localStreamRef.current = null;
-        }
-        if (hlsRef.current) {
-            hlsRef.current.destroy();
-            hlsRef.current = null;
-        }
-        if (localVideoRef.current) {
-            localVideoRef.current.srcObject = null;
-            localVideoRef.current.src = "";
-        }
-        Object.values(peerConnections.current).forEach(pc => pc.close());
-        peerConnections.current = {};
+        localStreamRef.current?.getTracks().forEach(t => t.stop());
+        sendTransportRef.current?.close();
+        recvTransportRef.current?.close();
         setIsLive(false);
         setRemoteStream(null);
+    };
+
+    const handleTransportCreated = async (params: any) => {
+        const device = deviceRef.current;
+        if (!device) return;
+
+        if (roleRef.current === "broadcaster") {
+            const transport = device.createSendTransport(params);
+            sendTransportRef.current = transport;
+
+            transport.on("connect", ({ dtlsParameters }, callback, errback) => {
+                socketRef.current?.send(JSON.stringify({
+                    type: "connect-transport",
+                    transportId: transport.id,
+                    dtlsParameters
+                }));
+
+                if (socketRef.current) {
+                    socketRef.current.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        if (data.type === "transport-connected") {
+                            callback();
+                            console.log("Transport connected");
+                        }
+                    }
+                }
+
+
+                // callback();
+            });
+
+            transport.on("produce", async ({ kind, rtpParameters }, callback, errback) => {
+                socketRef.current?.send(JSON.stringify({
+                    type: "produce",
+                    transportId: transport.id,
+                    kind,
+                    rtpParameters
+                }));
+
+                // Wait for 'produced' message from server
+                const onMessage = (event: MessageEvent) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === "produced" && data.kind === kind) {
+                        callback({ id: data.id });
+                        socketRef.current?.removeEventListener("message", onMessage);
+                    }
+                };
+                socketRef.current?.addEventListener("message", onMessage);
+            });
+
+            // Start producing tracks
+            if (localStreamRef.current) {
+                for (const track of localStreamRef.current.getTracks()) {
+                    await transport.produce({ track });
+                }
+            }
+        } else {
+            const transport = device.createRecvTransport(params);
+            recvTransportRef.current = transport;
+
+            transport.on("connect", ({ dtlsParameters }, callback, errback) => {
+                socketRef.current?.send(JSON.stringify({
+                    type: "connect-transport",
+                    transportId: transport.id,
+                    dtlsParameters
+                }));
+                callback();
+            });
+        }
+    };
+
+    const handleProducerList = async (producers: any) => {
+        // For each producer, create a consumer
+        socketRef.current?.send(JSON.stringify({ type: "create-transport" }));
+
+        // Wait for transport to be created
+        const onMessage = async (event: MessageEvent) => {
+            const data = JSON.parse(event.data);
+            if (data.type === "transport-created") {
+                socketRef.current?.removeEventListener("message", onMessage);
+                // Now we have recvTransportRef.current
+                for (const kind in producers) {
+                    consumeProducer(producers[kind]);
+                }
+            }
+        };
+        socketRef.current?.addEventListener("message", onMessage);
+    };
+
+    const consumeProducer = async (producerId: string) => {
+        const transport = recvTransportRef.current;
+        const device = deviceRef.current;
+        if (!transport || !device) return;
+
+        socketRef.current?.send(JSON.stringify({
+            type: "consume",
+            transportId: transport.id,
+            producerId,
+            rtpCapabilities: device.rtpCapabilities
+        }));
+
+        const onMessage = async (event: MessageEvent) => {
+            const data = JSON.parse(event.data);
+            if (data.type === "consumed" && data.producerId === producerId) {
+                const consumer = await transport.consume({
+                    id: data.id,
+                    producerId: data.producerId,
+                    kind: data.kind,
+                    rtpParameters: data.rtpParameters
+                });
+
+                socketRef.current?.send(JSON.stringify({ type: "resume", consumerId: consumer.id }));
+
+                setRemoteStream(prev => {
+                    if (prev) {
+                        prev.addTrack(consumer.track);
+                        return new MediaStream(prev.getTracks());
+                    }
+                    return new MediaStream([consumer.track]);
+                });
+                setIsLive(true);
+                socketRef.current?.removeEventListener("message", onMessage);
+            }
+        };
+        socketRef.current?.addEventListener("message", onMessage);
     };
 
     const startBroadcast = async () => {
@@ -151,9 +224,13 @@ export default function WebRTCStream() {
         if (!video) return;
 
         try {
-            // Setup HLS
             if (Hls.isSupported()) {
-                const hls = new Hls();
+                const hls = new Hls({
+                    liveSyncDurationCount: 3,
+                    liveMaxLatencyDurationCount: 5,
+                    maxLiveSyncPlaybackRate: 1.5, // Speed up playback to catch up if lagging
+                    enableWorker: true
+                });
                 hlsRef.current = hls;
                 hls.loadSource(hlsUrl);
                 hls.attachMedia(video);
@@ -161,183 +238,51 @@ export default function WebRTCStream() {
                 await new Promise<void>((resolve, reject) => {
                     hls.on(Hls.Events.MANIFEST_PARSED, () => resolve());
                     hls.on(Hls.Events.ERROR, (_, data) => {
-                        console.error("HLS Error:", data);
-                        if (data.fatal) reject(new Error("HLS Error"));
+                        if (data.fatal) reject(new Error("HLS playback failed"));
                     });
                 });
             } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
                 video.src = hlsUrl;
-            } else {
-                throw new Error("HLS not supported");
             }
 
             await video.play();
-            console.log("Video playing, waiting for frames and readyState. Current readyState:", video.readyState);
 
-            // Wait for video to have enough data and actual dimensions
-            if (video.readyState < 3 || video.videoWidth === 0) {
-                await new Promise((resolve) => {
-                    const checkState = () => {
-                        if (video.readyState >= 3 && video.videoWidth > 0) resolve(null);
-                        else setTimeout(checkState, 200);
-                    };
-                    checkState();
-                });
-            }
-
-            // Extra delay for HLS to stabilize
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            console.log(`Video ready: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
-
-            // Capture stream from video element with fixed frame rate
+            // Capture stream from the playing video
             // @ts-ignore
             const stream = video.captureStream ? video.captureStream(30) : (video as any).mozCaptureStream ? (video as any).mozCaptureStream(30) : null;
 
-            if (!stream) {
-                throw new Error("captureStream not supported");
-            }
+            if (!stream) throw new Error("Video capture not supported");
 
-            // Wait a moment for tracks to be added and become "live"
+            // Wait for tracks to appear
             let attempts = 0;
             while (stream.getTracks().length === 0 && attempts < 20) {
-                console.log("Waiting for tracks...");
-                await new Promise(resolve => setTimeout(resolve, 100));
+                await new Promise(r => setTimeout(r, 100));
                 attempts++;
             }
 
-            console.log("Captured stream tracks:", stream.getTracks().map((t: MediaStreamTrack) => `${t.kind} (${t.readyState})`));
-
             localStreamRef.current = stream;
+            socketRef.current?.send(JSON.stringify({ type: "create-transport" }));
             setIsLive(true);
-            socketRef.current?.send(JSON.stringify({ type: "request-viewers" }));
         } catch (err) {
-            console.error("Error starting HLS broadcast:", err);
-            alert("Could not start HLS broadcast.");
+            console.error("Broadcasting failed:", err);
             stopStream();
         }
     };
 
-    const handleNewViewer = async (viewerId: string) => {
-        console.log("Preparing to send offer to viewer:", viewerId);
-        const pc = new RTCPeerConnection(iceServers);
-        peerConnections.current[viewerId] = pc;
-        candidateQueues.current[viewerId] = [];
-
-        if (localStreamRef.current) {
-            console.log("Broadcaster adding tracks to PC:", localStreamRef.current.getTracks().length);
-            localStreamRef.current.getTracks().forEach(track => {
-                pc.addTrack(track, localStreamRef.current!);
-            });
-        } else {
-            console.warn("No local stream available when handling new viewer");
-        }
-
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                socketRef.current?.send(JSON.stringify({
-                    type: "candidate",
-                    candidate: event.candidate,
-                    to: viewerId,
-                    from: clientIdRef.current
-                }));
-            }
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        socketRef.current?.send(JSON.stringify({
-            type: "offer",
-            offer: offer,
-            to: viewerId,
-            from: clientIdRef.current
-        }));
-    };
-
-    const handleOffer = async (offer: RTCSessionDescriptionInit, broadcasterId: string) => {
-        console.log("Viewer handling offer from broadcaster:", broadcasterId);
-        const pc = new RTCPeerConnection(iceServers);
-        peerConnections.current[broadcasterId] = pc;
-        candidateQueues.current[broadcasterId] = [];
-
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                socketRef.current?.send(JSON.stringify({
-                    type: "candidate",
-                    candidate: event.candidate,
-                    to: broadcasterId,
-                    from: clientIdRef.current
-                }));
-            }
-        };
-
-        pc.ontrack = (event) => {
-            console.log("Viewer received track:", event.track.kind, "Streams:", event.streams.length);
-            if (event.streams && event.streams[0]) {
-                setRemoteStream(event.streams[0]);
-            } else {
-                setRemoteStream(prev => {
-                    if (prev) {
-                        if (!prev.getTracks().find(t => t.id === event.track.id)) {
-                            prev.addTrack(event.track);
-                        }
-                        return prev;
-                    } else {
-                        return new MediaStream([event.track]);
-                    }
+    const playHLS = () => {
+        if (remoteVideoRef.current && hlsUrl) {
+            if (Hls.isSupported()) {
+                const hls = new Hls({
+                    liveSyncDurationCount: 3,
+                    liveMaxLatencyDurationCount: 5,
+                    maxLiveSyncPlaybackRate: 2.5,
+                    enableWorker: true
                 });
-            }
-            setIsLive(true);
-        };
-
-        try {
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
-            console.log("Remote description set for broadcaster:", broadcasterId);
-
-            // Process queued candidates
-            const queue = candidateQueues.current[broadcasterId];
-            while (queue && queue.length > 0) {
-                const cand = queue.shift();
-                if (cand) await pc.addIceCandidate(new RTCIceCandidate(cand));
-            }
-
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-
-            socketRef.current?.send(JSON.stringify({
-                type: "answer",
-                answer: answer,
-                to: broadcasterId,
-                from: clientIdRef.current
-            }));
-        } catch (err) {
-            console.error("Error in handleOffer:", err);
-        }
-    };
-
-    const handleAnswer = async (answer: RTCSessionDescriptionInit, viewerId: string) => {
-        console.log("Broadcaster handling answer from viewer:", viewerId);
-        const pc = peerConnections.current[viewerId];
-        if (pc) {
-            await pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-            const queue = candidateQueues.current[viewerId];
-            while (queue && queue.length > 0) {
-                const cand = queue.shift();
-                if (cand) await pc.addIceCandidate(new RTCIceCandidate(cand));
-            }
-        }
-    };
-
-    const handleCandidate = async (candidate: RTCIceCandidateInit, fromId: string) => {
-        const pc = peerConnections.current[fromId];
-        if (pc) {
-            if (pc.remoteDescription && pc.remoteDescription.type) {
-                await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            } else {
-                if (!candidateQueues.current[fromId]) candidateQueues.current[fromId] = [];
-                candidateQueues.current[fromId].push(candidate);
+                hls.loadSource(hlsUrl);
+                hls.attachMedia(remoteVideoRef.current);
+                hlsRef.current = hls;
+            } else if (remoteVideoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
+                remoteVideoRef.current.src = hlsUrl;
             }
         }
     };
@@ -348,60 +293,38 @@ export default function WebRTCStream() {
                 <div className="card-header">
                     <h3>
                         <span className={`status-dot ${isLive ? 'active' : ''}`}></span>
-                        {role === "broadcaster" ? "You are Broadcaster" : "WebRTC Viewer"}
+                        {role === "broadcaster" ? "Mediasoup Broadcaster" : "SFU Viewer"}
                     </h3>
                     <span className="badge">Viewers: {viewerCount}</span>
                 </div>
 
                 <div className="screen">
                     {role === "broadcaster" ? (
-                        <video ref={localVideoRef} autoPlay playsInline muted crossOrigin="anonymous" />
+                        <video ref={localVideoRef} autoPlay playsInline muted />
                     ) : (
-                        <video ref={remoteVideoRef} autoPlay playsInline muted />
+                        <video ref={remoteVideoRef} autoPlay playsInline />
                     )}
-
-                    {!isLive && role === "viewer" && (
-                        <div className="placeholder">
-                            <p>Waiting for broadcast...</p>
-                        </div>
+                    {!isLive && role === "viewer" && !hlsUrl && (
+                        <div className="placeholder"><p>Waiting for SFU Stream...</p></div>
                     )}
                 </div>
 
                 <div className="controls">
-                    {role === "broadcaster" && (
-                        <div className="hls-input-group">
-                            <input
-                                type="text"
-                                value={hlsUrl}
-                                onChange={(e) => setHlsUrl(e.target.value)}
-                                placeholder="HLS Stream URL"
-                                disabled={isLive}
-                                className="hls-url-input"
-                            />
-                            {!isLive ? (
-                                <button className="btn-primary" onClick={startBroadcast}>Go Live (HLS)</button>
-                            ) : (
-                                <button className="btn-danger" onClick={stopStream}>Stop Broadcast</button>
-                            )}
-                        </div>
+                    {role === "broadcaster" && !isLive && (
+                        <button className="btn-primary" onClick={startBroadcast}>Start SFU Broadcast</button>
                     )}
-                    {role === "viewer" && (
-                        <p className="status-text">{isLive ? "Watching Live" : "Disconnected"}</p>
+                    {role === "broadcaster" && isLive && (
+                        <button className="btn-danger" onClick={stopStream}>Stop Broadcast</button>
+                    )}
+                    {role === "viewer" && hlsUrl && (
+                        <button className="btn-primary" onClick={playHLS}>Switch to HLS (Persistent)</button>
                     )}
                 </div>
             </div>
 
             <style jsx>{`
                 .webrtc-container { width: 100%; }
-                .video-card {
-                    background: #1e293b;
-                    border-radius: 1rem;
-                    padding: 1.5rem;
-                    border: 1px solid #334155;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 1rem;
-                }
+                .video-card { background: #1e293b; border-radius: 1rem; padding: 1.5rem; border: 1px solid #334155; display: flex; flex-direction: column; gap: 1rem; }
                 .card-header { display: flex; justify-content: space-between; align-items: center; }
                 h3 { margin: 0; font-size: 0.9rem; color: #94a3b8; text-transform: uppercase; display: flex; align-items: center; gap: 0.5rem; }
                 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
@@ -410,22 +333,9 @@ export default function WebRTCStream() {
                 .screen { width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 0.5rem; overflow: hidden; position: relative; }
                 video { width: 100%; height: 100%; object-fit: cover; }
                 .placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #64748b; }
-                .controls { margin-top: 0.5rem; }
                 button { width: 100%; padding: 0.75rem; border-radius: 0.5rem; border: none; font-weight: 600; cursor: pointer; transition: 0.2s; }
                 .btn-primary { background: #38bdf8; color: #0f172a; }
-                .btn-primary:hover { background: #7dd3fc; }
                 .btn-danger { background: #ef4444; color: white; }
-                .status-text { text-align: center; color: #64748b; font-size: 0.8rem; margin: 0; }
-                .hls-input-group { display: flex; flex-direction: column; gap: 0.75rem; }
-                .hls-url-input {
-                    background: #0f172a;
-                    border: 1px solid #334155;
-                    padding: 0.75rem;
-                    border-radius: 0.5rem;
-                    color: white;
-                    font-size: 0.8rem;
-                }
-                .hls-url-input:disabled { opacity: 0.5; cursor: not-allowed; }
             `}</style>
         </div>
     );
