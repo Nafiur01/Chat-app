@@ -1,0 +1,9 @@
+{
+    "ignore": [
+        "hls_output/*"
+    ],
+    "watch": [
+        "*"
+    ],
+    "ext": "js,json"
+}
