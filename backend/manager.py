@@ -4,6 +4,7 @@ from cv_processing.cv_processing import video_processing_v2
 from threading import Event as StopEvent
 from typing import Dict
 from fastapi import WebSocket
+from schema import Client
 
 
 # Stream Manager
@@ -69,39 +70,56 @@ stream_manager = StreamManager()
 
 class WebSocketManager:
     def __init__(self):
-        self.active_connections: Dict[str,WebSocket] = {}
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.clients: Dict[str, Client] = {}
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, client: Client = None):
+        if client is None:
+            client = Client()
+        
         await websocket.accept()
-        client_id = f"{websocket.client.host}:{websocket.client.port}"
-        self.active_connections[client_id] = websocket
+        # Store client_id in websocket state for later lookup
+        websocket.scope["client_id"] = client.client_id
+        
+        self.active_connections[client.client_id] = websocket
+        self.clients[client.client_id] = client
         stream_manager.viewers += 1
-        print(f"Client {client_id} connected. Total viewers: {stream_manager.viewers}")
+        print(f"Client {client.client_id} connected. Total viewers: {stream_manager.viewers}")
         
         # Broadcast viewer count to all
         await self.broadcast({"type": "viewer_count", "count": stream_manager.viewers})
+        client_join_msg = {"type":"chat","client_id":"Server","message":f"Client {client.client_id.split('-')[0]} joined"}
+        await self.broadcast(client_join_msg)
         
+        # Always consume the first message (the stream URL) to clear the buffer
+        try:
+            stream_url = await websocket.receive_text()
+            print(f"Received initial URL from client {client.client_id}")
+        except Exception as e:
+            print(f"Failed to receive initial URL: {e}")
+            await self.disconnect(websocket)
+            return
+
         if stream_manager.viewers == 1 and not stream_manager.running:
             try:
-                # Expect the stream URL as the first message
-                stream_url = await websocket.receive_text()
-                print(f"Received stream URL from client: '{stream_url}'")
                 stream_manager.url = stream_url
                 is_ready = await stream_manager.start(stream_url)
                 if is_ready:
-                    await websocket.send_json({"type": "ready", "url": "http://127.0.0.1:8000/hls/stream.m3u8"})
+                    await websocket.send_json({"type": "ready", "url": "http://127.0.0.1:8000/hls/stream.m3u8", "client_id": client.client_id})
                 else:
                     await websocket.send_json({"type": "error", "message": "Stream startup timeout"})
             except Exception as e:
                 print(f"Error starting stream: {e}")
                 await self.disconnect(websocket)
         elif stream_manager.running:
-            await websocket.send_json({"type": "ready", "url": "http://127.0.0.1:8000/hls/stream.m3u8"})
+            await websocket.send_json({"type": "ready", "url": "http://127.0.0.1:8000/hls/stream.m3u8", "client_id": client.client_id})
 
     async def disconnect(self, websocket: WebSocket):
-        client_id = f"{websocket.client.host}:{websocket.client.port}"
+        client_id = websocket.scope.get("client_id")
         if client_id in self.active_connections:
             del self.active_connections[client_id]
+            if client_id in self.clients:
+                del self.clients[client_id]
             stream_manager.viewers -= 1
             print(f"Client {client_id} disconnected. Total viewers: {stream_manager.viewers}")
             await self.broadcast({"type": "viewer_count", "count": stream_manager.viewers})
@@ -127,6 +145,11 @@ class WebSocketManager:
         for client_id in disconnected_clients:
             if client_id in self.active_connections:
                 del self.active_connections[client_id]
+                if client_id in self.clients:
+                    del self.clients[client_id]
                 stream_manager.viewers -= 1
+        
+        if disconnected_clients:
+            await self.broadcast({"type": "viewer_count", "count": stream_manager.viewers})
 
 ws_manager = WebSocketManager()

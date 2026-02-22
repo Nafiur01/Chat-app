@@ -3,13 +3,17 @@ import Hls from 'hls.js';
 import { useState, useRef, useEffect } from 'react';
 
 export default function Home() {
-  const [streamUrl, setStreamUrl] = useState("./../big_chungus.mp4");
+  const [streamUrl, setStreamUrl] = useState("./../big_buck_bunny_720p.mov");
   const [hlsUrl, setHlsUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [viewers, setViewers] = useState(0);
+  const [clientId, setClientId] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const startStream = async () => {
     setLoading(true);
@@ -30,12 +34,15 @@ export default function Home() {
         if (data.type === "ready") {
           console.log("Stream is ready at:", data.url);
           setHlsUrl(data.url);
+          setClientId(data.client_id);
           setLoading(false);
         } else if (data.type === "error") {
           setError(data.message);
           setLoading(false);
-        }else if(data.type === "viewer_count"){
+        } else if (data.type === "viewer_count") {
           setViewers(data.count);
+        } else if (data.type === "chat") {
+          setMessages(prev => [...prev.slice(-49), data]);
         }
       };
 
@@ -46,6 +53,10 @@ export default function Home() {
       };
 
       ws.onclose = () => {
+        wsRef.current?.send(JSON.stringify({
+          type: "chat",
+          message: "Client " + clientId + " disconnected"
+        }));
         console.log("WebSocket connection closed");
         setHlsUrl("");
         setLoading(false);
@@ -64,6 +75,20 @@ export default function Home() {
     }
     setHlsUrl("");
   };
+
+  const sendChat = () => {
+    if (wsRef.current && chatInput.trim()) {
+      wsRef.current.send(JSON.stringify({
+        type: "chat",
+        message: chatInput
+      }));
+      setChatInput("");
+    }
+  };
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   useEffect(() => {
     return () => {
@@ -151,7 +176,9 @@ export default function Home() {
         </div>
         {error && <p className="text-sm text-red-500">{error}</p>}
       </div>
+          
 
+      <div className='flex justify-center items-center gap-2 w-full'>
       <div className="w-full max-w-4xl overflow-hidden rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 bg-black">
         <video
           ref={videoRef}
@@ -163,7 +190,38 @@ export default function Home() {
           loop
         />
       </div>
+
+      <div className="chat-container bg-slate-800 p-4 rounded-lg w-full max-w-md min-h-[500px] flex flex-col">
+        <div className="flex-1 overflow-y-auto mb-2">
+          {messages.map((m, i) => (
+            <div key={i} className="mb-2 text-sm">
+              <span className="text-zinc-500 text-xs mr-2">{m.timestamp}</span>
+              <span className="font-bold text-blue-400">{m.client_id.split('-')[0]}: </span>
+              <span className="text-white wrap-break-word">{m.message}</span>
+            </div>
+          ))}
+          <div ref={chatEndRef} />
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && sendChat()}
+            className="bg-slate-700 text-white p-2 rounded flex-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            placeholder="Type a message..."
+          />
+          <button onClick={sendChat} className="bg-blue-600 px-4 py-2 rounded">Send</button>
+        </div>
+      </div>
+
+
+      </div>
+
       <h1 className='flex mt-2 bg-amber-500 text-black px-2 py-1 text-xl rounded-lg'><span className='font-bold'>Viewers count:</span> {viewers}</h1>
+      <h1 className='flex mt-2 bg-blue-500 text-gray-100 px-2 py-1 text-xl rounded-lg'><span className='font-bold'>Client ID:</span> {clientId.split('-')[0]}</h1>
+
+      
+
     </div>
   );
 }

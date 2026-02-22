@@ -1,0 +1,4 @@
+backend/hls_output/
+big_buck_bunny_720p.mov
+backend/venv/
+backend/venv/*

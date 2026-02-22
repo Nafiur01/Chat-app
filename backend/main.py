@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 from fastapi.middleware.cors import CORSMiddleware
 from manager import ws_manager
+from schema import ChatMessage
 
 app = FastAPI()
 
@@ -53,7 +54,36 @@ async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            # We use receive_json because all messages after the initial URL should be JSON
+            try:
+                data = await websocket.receive_json()
+                print(f"Received data from client: {data}")
+                
+                # Simple routing based on a 'type' if present, or default to chat
+                msg_type = data.get("type", "chat")
+                
+                if msg_type == "chat":
+                    # Use the server-side assigned client_id for security
+                    client_id = websocket.scope.get("client_id", "unknown")
+                    message_text = data.get("message", "")
+                    
+                    if message_text:
+                        chat_msg = ChatMessage(client_id=client_id, message=message_text)
+                        # Broadcast with a 'type' so frontend can identify it
+                        payload = chat_msg.dict()
+                        payload["type"] = "chat"
+                        await ws_manager.broadcast(payload)
+                
+            except WebSocketDisconnect:
+                disconn_msg = ChatMessage(client_id=websocket.scope.get("client_id", "unknown"), message=f"Client {websocket.scope.get("client_id", "unknown").split("-")[0]} disconnected").dict()
+                disconn_msg["type"] = "chat"
+                await ws_manager.broadcast(disconn_msg)
+                raise
+
+            except Exception as e:
+                print(f"Error processing message: {e}")
+                continue
+                
     except WebSocketDisconnect:
         await ws_manager.disconnect(websocket)
     except Exception as e:
